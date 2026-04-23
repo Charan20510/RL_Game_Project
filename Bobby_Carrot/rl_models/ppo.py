@@ -527,6 +527,9 @@ def train_ppo(
 
         # ── PPO Update ────────────────────────────────────────
         agent.train()
+        torch.set_grad_enabled(True)
+        agent.requires_grad_(True)
+        
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_entropy = 0.0
