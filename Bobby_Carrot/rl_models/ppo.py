@@ -142,7 +142,7 @@ def pretrain_bc(
     expert_moves: List[int],
     preprocessor: ObservationPreprocessor,
     device: torch.device,
-    epochs: int = 50,
+    epochs: int = 200,
     lr: float = 1e-3,
 ) -> None:
     print(f"[BC] Starting Behavioral Cloning pre-training for {epochs} epochs...")
@@ -283,10 +283,14 @@ def train_ppo(
     )
 
     # Optional BC Pre-training
+    _entropy_start = ppo_config.entropy_coeff
     if expert_moves is not None and len(expert_moves) > 0:
         pretrain_bc(agent, env, expert_moves, preprocessor, device)
         # Re-initialize teacher with pretrained weights
         teacher.load_state_dict(agent.state_dict())
+        # BC gave the agent a warm start; keep entropy at entropy_min so PPO
+        # refines the BC policy instead of exploring away from it immediately.
+        _entropy_start = ppo_config.entropy_min
 
     # Determine obs_dim from a reset
     dummy_obs = env.reset()
@@ -603,8 +607,8 @@ def train_ppo(
                 entropy_loss = -entropy.mean()
                 # Decay entropy coeff from initial to entropy_min over training
                 progress = min(1.0, total_timesteps / train_config.total_timesteps)
-                current_entropy_coeff = ppo_config.entropy_coeff + progress * (
-                    ppo_config.entropy_min - ppo_config.entropy_coeff
+                current_entropy_coeff = _entropy_start + progress * (
+                    ppo_config.entropy_min - _entropy_start
                 )
                 # Temporary entropy boost after a curriculum promotion —
                 # forces exploration on the newly-added level before the
