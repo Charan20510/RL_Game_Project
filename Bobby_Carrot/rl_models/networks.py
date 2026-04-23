@@ -65,134 +65,96 @@ class ObservationPreprocessor:
 
     def process_single(self, obs: np.ndarray) -> torch.Tensor:
         """Process one observation → (C, 16, 16)."""
-        obs = np.asarray(obs, dtype=np.int16)
-        channels = np.zeros((_NUM_OBS_CHANNELS, 16, 16), dtype=np.float32)
+        return self.process_numpy_batch(np.asarray(obs, dtype=np.int16)[None])[0]
 
-        # First 2 values are always (px, py)
-        px, py = int(obs[0]), int(obs[1])
+    @staticmethod
+    def _parse_obs_batch(obs_array: np.ndarray):
+        """Parse raw obs batch → (px, py, inv, tiles_hw, path_hw, finish_hw).
 
-        # Determine inventory offset
-        # Full mode: [px, py, <inv 4>, <tiles 256>, <path 256 (optional)>]
-        obs_len = len(obs)
-        path_grid = np.zeros(256, dtype=np.int16)
-        finish_path_grid = np.zeros(256, dtype=np.int16)
+        tiles_hw / path_hw / finish_hw have shape (B, 16, 16).
+        tiles_hw[b, y, x] == tiles[b, x + y*16] because reshape is row-major
+        and tiles[x + y*16] == tiles[y*16 + x].
+        """
+        B, obs_len = obs_array.shape
+        px = obs_array[:, 0].astype(np.int32)
+        py = obs_array[:, 1].astype(np.int32)
+
+        path  = np.zeros((B, 256), dtype=np.int16)
+        finish = np.zeros((B, 256), dtype=np.int16)
 
         if obs_len >= 2 + 4 + 256 + 256 + 256:
-            # With inventory + path trace + finish-critical path
-            inv = obs[2:6]
-            tiles = obs[6:6 + 256]
-            path_grid = obs[6 + 256 : 6 + 512]
-            finish_path_grid = obs[6 + 512 : 6 + 768]
+            inv    = obs_array[:, 2:6]
+            tiles  = obs_array[:, 6:262]
+            path   = obs_array[:, 262:518]
+            finish = obs_array[:, 518:774]
         elif obs_len >= 2 + 4 + 256 + 256:
-            # With inventory + path trace (no finish path)
-            inv = obs[2:6]
-            tiles = obs[6:6 + 256]
-            path_grid = obs[6 + 256 : 6 + 512]
-        elif obs_len >= 2 + 256 + 256:
-            # Without inventory + path trace
-            inv = np.zeros(4, dtype=np.int16)
-            tiles = obs[2:2 + 256]
-            path_grid = obs[2 + 256 : 2 + 512]
+            inv   = obs_array[:, 2:6]
+            tiles = obs_array[:, 6:262]
+            path  = obs_array[:, 262:518]
         elif obs_len >= 2 + 4 + 256:
-            # With inventory (no path)
-            inv = obs[2:6]
-            tiles = obs[6:6 + 256]
+            inv   = obs_array[:, 2:6]
+            tiles = obs_array[:, 6:262]
         elif obs_len >= 2 + 256:
-            # Without inventory (no path)
-            inv = np.zeros(4, dtype=np.int16)
-            tiles = obs[2:2 + 256]
+            inv   = np.zeros((B, 4), dtype=np.int16)
+            tiles = obs_array[:, 2:258]
         else:
-            # Local/compact mode — create a blank 16×16 and fill what we can
-            inv = np.zeros(4, dtype=np.int16)
-            tiles = np.zeros(256, dtype=np.int16)
-            remaining = obs[2:] if obs_len > 2 else np.array([], dtype=np.int16)
-            local_size = int(math.isqrt(len(remaining))) if len(remaining) > 0 else 0
-            if local_size > 0:
-                half = local_size // 2
-                for idx, val in enumerate(remaining):
-                    dy = idx // local_size - half
-                    dx = idx % local_size - half
-                    gx, gy = px + dx, py + dy
-                    if 0 <= gx < 16 and 0 <= gy < 16:
-                        tiles[gx + gy * 16] = val
+            inv   = np.zeros((B, 4), dtype=np.int16)
+            tiles = np.zeros((B, 256), dtype=np.int16)
 
-        # Fill tile channels
-        for y in range(16):
-            for x in range(16):
-                tile = int(tiles[x + y * 16])
-                if tile >= 18:
-                    channels[0, y, x] = 1.0
-                if tile == 19:
-                    channels[1, y, x] = 1.0
-                if tile == 45:
-                    channels[2, y, x] = 1.0
-                if tile == 44:
-                    channels[3, y, x] = 1.0
-                if tile == 30:
-                    channels[4, y, x] = 1.0
-                if tile == 31 or tile == 46:
-                    channels[5, y, x] = 1.0
-                if tile in (32, 34, 36):
-                    channels[6, y, x] = 1.0
-                if tile in (33, 35, 37):
-                    channels[7, y, x] = 1.0
-                # Directional conveyor channels (10-13) — each direction is a
-                # separate semantic plane so the CNN can learn "this tile forces
-                # LEFT" independently from "this tile forces RIGHT".
-                if tile == 40:
-                    channels[10, y, x] = 1.0   # forces LEFT
-                if tile == 41:
-                    channels[11, y, x] = 1.0   # forces RIGHT
-                if tile == 42:
-                    channels[12, y, x] = 1.0   # forces UP
-                if tile == 43:
-                    channels[13, y, x] = 1.0   # forces DOWN
-                # Arrow & bi-directional conveyor tiles (24-29): restrict which
-                # directions are legal to enter/exit — grouped as one channel
-                # since the shared semantics are "directional restriction".
-                if tile in (24, 25, 26, 27, 28, 29):
-                    channels[14, y, x] = 1.0
-                # Switch tiles (22, 23, 38, 39): stepping triggers a global
-                # map-state flip — distinct from directional mechanics.
-                if tile in (22, 23, 38, 39):
-                    channels[15, y, x] = 1.0
-                # Visited-safe: tile==20 means a carrot was collected here.
-                # tile==46 is already on channel 5 (hazard) — no duplication.
-                if tile == 20:
-                    channels[16, y, x] = 1.0
+        tiles_hw  = tiles.reshape(B, 16, 16)
+        path_hw   = path.reshape(B, 16, 16)
+        finish_hw = finish.reshape(B, 16, 16)
+        return px, py, inv, tiles_hw, path_hw, finish_hw
 
-        # Agent position channel
-        if 0 <= px < 16 and 0 <= py < 16:
-            channels[8, py, px] = 1.0
+    def process_numpy_batch(self, obs_array: np.ndarray) -> torch.Tensor:
+        """Vectorised batch: (B, obs_dim) int16 → (B, C, 16, 16) float32 on device."""
+        obs_array = np.asarray(obs_array, dtype=np.int16)
+        B = obs_array.shape[0]
+        px, py, inv, tw, ph, fh = self._parse_obs_batch(obs_array)
 
-        # Inventory channel — broadcast key/remaining info
-        key_gray = float(inv[0]) if len(inv) > 0 else 0.0
-        key_yellow = float(inv[1]) if len(inv) > 1 else 0.0
-        key_red = float(inv[2]) if len(inv) > 2 else 0.0
-        remaining = float(inv[3]) / 10.0 if len(inv) > 3 else 0.0
-        # Encode as a spatial pattern: top-left quadrant = keys, bottom-right = remaining
-        channels[9, 0:8, 0:8] = key_gray * 0.33 + key_yellow * 0.33 + key_red * 0.34
-        channels[9, 8:16, 8:16] = remaining
+        ch = np.zeros((B, _NUM_OBS_CHANNELS, 16, 16), dtype=np.float32)
 
-        # Channel 17: Path Trace History (visit counts, normalised by loop_window=32)
-        # Values are 0..32 integers from the env; dividing by 32 gives a [0,1] signal
-        # that encodes how recently/frequently the agent has occupied each cell.
-        # High values mark oscillation hot-spots; the policy can learn to avoid them.
-        channels[17, :, :] = path_grid.reshape((16, 16)).astype(np.float32) / 32.0
+        # Tile channels (vectorised over full batch)
+        ch[:, 0]  = (tw >= 18)
+        ch[:, 1]  = (tw == 19)
+        ch[:, 2]  = (tw == 45)
+        ch[:, 3]  = (tw == 44)
+        ch[:, 4]  = (tw == 30)
+        ch[:, 5]  = (tw == 31) | (tw == 46)
+        ch[:, 6]  = np.isin(tw, [32, 34, 36])
+        ch[:, 7]  = np.isin(tw, [33, 35, 37])
+        ch[:, 10] = (tw == 40)
+        ch[:, 11] = (tw == 41)
+        ch[:, 12] = (tw == 42)
+        ch[:, 13] = (tw == 43)
+        ch[:, 14] = np.isin(tw, [24, 25, 26, 27, 28, 29])
+        ch[:, 15] = np.isin(tw, [22, 23, 38, 39])
+        ch[:, 16] = (tw == 20)
 
-        # Channel 18: Finish-Critical Path (BFS shortest path to finish)
-        channels[18, :, :] = finish_path_grid.reshape((16, 16)).astype(np.float32)
+        # Agent position (one cell per sample)
+        valid = (px >= 0) & (px < 16) & (py >= 0) & (py < 16)
+        b_idx = np.where(valid)[0]
+        ch[b_idx, 8, py[b_idx], px[b_idx]] = 1.0
 
-        return torch.from_numpy(channels).to(self.device)
+        # Inventory channel
+        key_gray   = inv[:, 0].astype(np.float32)
+        key_yellow = inv[:, 1].astype(np.float32)
+        key_red    = inv[:, 2].astype(np.float32)
+        remaining  = inv[:, 3].astype(np.float32) / 10.0
+        key_val = (key_gray * 0.33 + key_yellow * 0.33 + key_red * 0.34)[:, None, None]
+        ch[:, 9, 0:8, 0:8]   = key_val
+        ch[:, 9, 8:16, 8:16] = remaining[:, None, None]
+
+        # Path trace and finish-critical path
+        ch[:, 17] = ph.astype(np.float32) / 32.0
+        ch[:, 18] = fh.astype(np.float32)
+
+        return torch.from_numpy(ch).to(self.device)
 
     def process_batch(self, obs_list: List[np.ndarray]) -> torch.Tensor:
         """Process a list of observations → (B, C, 16, 16)."""
-        tensors = [self.process_single(o) for o in obs_list]
-        return torch.stack(tensors)
+        return self.process_numpy_batch(np.stack(obs_list))
 
-    def process_numpy_batch(self, obs_array: np.ndarray) -> torch.Tensor:
-        """Process a numpy array of shape (B, obs_dim) → (B, C, 16, 16)."""
-        return self.process_batch([obs_array[i] for i in range(obs_array.shape[0])])
 
 
 # ---------------------------------------------------------------------------

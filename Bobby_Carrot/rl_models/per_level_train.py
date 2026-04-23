@@ -95,6 +95,7 @@ def train_ppo_single_level(
     verbose: bool = True,
     log_interval: int = 5_000,
     teacher_kl_coef: float = 0.05,
+    explore_eps: float = 0.10,
 ) -> LevelTrainResult:
     """Run PPO on a single level and save a checkpoint on completion.
 
@@ -198,7 +199,19 @@ def train_ppo_single_level(
             if total_timesteps_done >= total_timesteps:
                 break
 
-            action, log_prob, value = agent.select_action(obs_tensor, action_mask_tensor)
+            # Epsilon-greedy: force a random valid action to escape BC determinism.
+            # Stores log_prob under the current policy (not uniform), so the PPO
+            # importance ratio correctly credits/penalizes the forced action.
+            if explore_eps > 0 and np.random.random() < explore_eps:
+                valid_acts = np.where(action_mask_np)[0]
+                action = int(np.random.choice(valid_acts))
+                with torch.no_grad():
+                    feats_ep = agent.encoder(obs_tensor.unsqueeze(0))
+                    dist_ep  = agent.policy(feats_ep, action_mask=action_mask_tensor.unsqueeze(0))
+                    log_prob = float(dist_ep.log_prob(torch.tensor([action], device=device)).item())
+                    value    = float(agent.value(feats_ep).item())
+            else:
+                action, log_prob, value = agent.select_action(obs_tensor, action_mask_tensor)
             next_obs_raw, reward, done, info = env.step(action)
 
             rollout.add(
@@ -258,9 +271,12 @@ def train_ppo_single_level(
                 if cfg.normalize_advantages:
                     adv_b = (adv_b - adv_b.mean()) / (adv_b.std() + 1e-8)
 
-                log_probs_b, values_b, entropy_b = agent.evaluate_actions(
-                    obs_b, actions_b, masks_b
-                )
+                # Single encoder pass — features reused for policy, value, and KL.
+                features_b = agent.encoder(obs_b)
+                dist_b     = agent.policy(features_b, action_mask=masks_b)
+                values_b   = agent.value(features_b)
+                log_probs_b = dist_b.log_prob(actions_b)
+                entropy_b   = dist_b.entropy()
 
                 ratio = torch.exp(log_probs_b - old_lp_b)
                 surr1 = ratio * adv_b
@@ -269,36 +285,39 @@ def train_ppo_single_level(
 
                 value_loss = cfg.value_coeff * nn.functional.mse_loss(values_b, ret_b)
 
-                # KL divergence against teacher
+                # KL divergence against teacher — reuses dist_b.logits, no second encoder pass.
+                # KL anneals from kl_coef → 10% of kl_coef over the first 60% of training,
+                # then holds at 10% so the BC anchor releases before exploration is needed.
+                progress = min(1.0, total_timesteps_done / total_timesteps)
+                kl_anneal = max(0.1, 1.0 - progress / 0.6)
+                eff_kl_coef = teacher_kl_coef * kl_anneal
+
                 kl_loss = torch.tensor(0.0, device=device)
-                if teacher is not None and teacher_kl_coef > 0:
+                if teacher is not None and eff_kl_coef > 0:
                     with torch.no_grad():
                         t_features = teacher.encoder(obs_b)
                         t_dist = teacher.policy(t_features, action_mask=masks_b)
                         t_log_probs = torch.log_softmax(t_dist.logits, dim=-1)
-                    
-                    s_dist = agent.policy(agent.encoder(obs_b), action_mask=masks_b)
-                    s_log_probs = torch.log_softmax(s_dist.logits, dim=-1)
+
+                    s_log_probs = torch.log_softmax(dist_b.logits, dim=-1)
                     s_probs = s_log_probs.exp()
-                    
                     kl_per_action = s_probs * (s_log_probs - t_log_probs)
                     kl_per_action = torch.where(
                         torch.isfinite(kl_per_action),
                         kl_per_action,
-                        torch.zeros_like(kl_per_action)
+                        torch.zeros_like(kl_per_action),
                     )
                     kl_loss = kl_per_action.sum(dim=-1).mean()
 
-                # Entropy decays toward entropy_min; doubled if agent is stuck at 0% past 30% of budget
-                progress = min(1.0, total_timesteps_done / total_timesteps)
+                # Entropy decays toward entropy_min; tripled when stuck at 0% past 15% of budget
                 eff_entropy_coeff = cfg.entropy_coeff - progress * (cfg.entropy_coeff - cfg.entropy_min)
-                if (progress > 0.30 and len(episode_successes) >= 10
+                if (progress > 0.15 and len(episode_successes) >= 5
                         and float(np.mean(episode_successes[-32:])) == 0.0):
-                    eff_entropy_coeff = min(eff_entropy_coeff * 2.0, 0.3)
+                    eff_entropy_coeff = min(eff_entropy_coeff * 3.0, 0.4)
 
                 entropy_loss = -eff_entropy_coeff * entropy_b.mean()
 
-                loss = policy_loss + value_loss + entropy_loss + (teacher_kl_coef * kl_loss)
+                loss = policy_loss + value_loss + entropy_loss + (eff_kl_coef * kl_loss)
                 optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(agent.parameters(), cfg.max_grad_norm)
@@ -398,6 +417,7 @@ def train_all_levels(
     seed: int = 42,
     verbose: bool = True,
     teacher_kl_coef: float = 0.05,
+    explore_eps: float = 0.10,
 ) -> List[LevelTrainResult]:
     """Train PPO on each level sequentially, saving a checkpoint for each.
 
@@ -449,6 +469,7 @@ def train_all_levels(
             seed=seed + num,
             verbose=verbose,
             teacher_kl_coef=teacher_kl_coef,
+            explore_eps=explore_eps,
         )
         results.append(result)
 
@@ -524,6 +545,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--kl-coef", type=float, default=0.3, help="KL divergence coeff for teacher policy (default 0.3)")
     parser.add_argument("--rollout", type=int, default=2048,
                         help="Rollout buffer size. Default: 2048.")
+    parser.add_argument("--explore-eps", type=float, default=0.10,
+                        help="Epsilon for forced random actions during rollout (default 0.10).")
     parser.add_argument("--quiet", action="store_true",
                         help="Suppress per-epoch output.")
     args = parser.parse_args(argv)
@@ -555,6 +578,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         seed=args.seed,
         verbose=not args.quiet,
         teacher_kl_coef=args.kl_coef,
+        explore_eps=args.explore_eps,
     )
 
 

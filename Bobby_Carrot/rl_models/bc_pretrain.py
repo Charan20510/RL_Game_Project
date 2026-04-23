@@ -108,7 +108,10 @@ def train_bc_on_dataset(
         drop_last=False,
         num_workers=0,
     )
-    criterion = nn.CrossEntropyLoss()
+    # Label smoothing prevents entropy collapse: target becomes 0.9×one-hot + 0.025×uniform.
+    # Without it, BC on small datasets drives policy logits to ±∞ (H≈0), which locks
+    # the RL warm-start into a deterministic attractor the entropy bonus cannot escape.
+    criterion = nn.CrossEntropyLoss(label_smoothing=0.1)
 
     epoch_losses: List[float] = []
     agent.train()
