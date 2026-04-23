@@ -1,0 +1,45 @@
+===============================    Capture Game Play By Frames    ===============================
+
+python -m Bobby_Carrot.rl_models.evaluate --algo ppo \
+  --checkpoint "/home/charan/Projects/Mini_Project_Game/checkpoints_level1/ppo/ppo_best.pt" \
+  --episodes 1 \
+  --render --render-fps 5.0 --levels normal-1 --save-frames \
+  --frames-dir L1_captured_frames
+
+python -m Bobby_Carrot.rl_models.evaluate --algo ppo \
+  --checkpoint "/home/charan/Projects/Mini_Project_Game/checkpoints_level2/ppo/ppo_best.pt" \
+  --episodes 1 \
+  --render --render-fps 5.0 --levels normal-2 --save-frames \
+  --frames-dir L2_captured_frames
+
+
+===============================    Play LEVEL (GUI)    ===============================
+
+-------------  checkpoints_level1  -------------
+
+python -m Bobby_Carrot.rl_models.evaluate \
+  --algo ppo \
+  --checkpoint /home/charan/Projects/Mini_Project_Game/checkpoints_level1/ppo/ppo_best.pt \
+  --episodes 1 \
+  --max-steps 300 \
+  --render \
+  --render-fps 5 \
+  --levels normal-1
+
+-------------  checkpoints_level2  -------------
+
+python -m Bobby_Carrot.rl_models.evaluate \
+  --algo ppo \
+  --checkpoint /home/charan/Projects/Mini_Project_Game/checkpoints_level2/ppo/ppo_best.pt \
+  --episodes 1 \
+  --max-steps 300 \
+  --render \
+  --render-fps 5 \
+  --levels normal-2
+
+
+=========================   Play GUI   ===========================
+
+python -m Bobby_Carrot.rl_models.play_agent \
+    --checkpoint checkpoints/per_level/normal_05_final.pt \
+    --episodes 1 --fps 3

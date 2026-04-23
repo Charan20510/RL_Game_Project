@@ -1,0 +1,17 @@
+[project]
+name = "bobby_carrot_launcher"
+version = "0.1.0"
+description = "Python wrapper and pure-Python implementation of the Bobby Carrot game."
+authors = [{ name = "Your Name", email = "you@example.com" }]
+
+# project dependencies go in the main [project] section per PEP 621
+# dependencies are not specified here because pygame may
+# need a prebuilt wheel matching the user's Python version.
+# install pygame manually in your environment when required.
+
+[project.scripts]
+play = "run:main"
+run-python = "bobby_carrot:main"  # entry point for the pure-Python version
+
+[tool.setuptools.packages.find]
+include = ["bobby_carrot"]

@@ -1,0 +1,15 @@
+search_path = [".", "Game_Python", "Bobby_Carrot"]
+exclude = ["*.ipynb"]
+
+ignore-imports = [
+    "bobby_carrot.*",
+    "pandas",
+    "matplotlib.*",
+    "google.colab",
+]
+
+[errors]
+# These are false positives from the lazy-import pattern used in train_dqn.py
+# (torch/DQNAgent/NStepBuffer are set to None and imported at runtime via _ensure_torch())
+missing-attribute = false
+not-callable = false
