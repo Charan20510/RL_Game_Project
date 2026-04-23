@@ -51,25 +51,16 @@ python -m Bobby_Carrot.rl_models.play_agent \
 python -m Bobby_Carrot.rl_models.dataset_gen \
     --levels 1-30 --output-dir expert_data
 
+
 python -m Bobby_Carrot.rl_models.bc_pretrain \
     --data-dir expert_data --ckpt-dir checkpoints/bc --epochs 80
 
-# Kill the current training run (Ctrl+C), then:
 
-# Retrain BC with label smoothing (prevents entropy collapse)
 python -m Bobby_Carrot.rl_models.bc_pretrain \
     --data-dir expert_data --ckpt-dir checkpoints/bc \
     --joint --joint-epochs 100
 
+
 python -m Bobby_Carrot.rl_models.bc_pretrain \
     --data-dir expert_data --ckpt-dir checkpoints/bc \
     --resume checkpoints/bc/joint_bc.pt --epochs 80
-
-# Delete the failed checkpoint and restart PPO with all fixes
-rm -f checkpoints/per_level/normal_05_*.pt
-
-python -m Bobby_Carrot.rl_models.per_level_train \
-    --levels 5 \
-    --bc-dir checkpoints/bc \
-    --ckpt-dir checkpoints/per_level \
-    --timesteps 300000 --device cuda
