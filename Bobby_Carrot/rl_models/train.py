@@ -52,6 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
     # Curriculum
     p.add_argument("--curriculum", action="store_true", default=True, help="Enable curriculum learning")
     p.add_argument("--no-curriculum", action="store_false", dest="curriculum")
+    p.add_argument("--train-per-level", action="store_true", default=False, help="Train each level individually with BC pre-training and distinct checkpoints")
     p.add_argument("--reset-policy-head", action="store_true", default=True,
                    help="Reset policy head when resuming (for phase transfer)")
     p.add_argument("--no-reset-policy-head", action="store_false", dest="reset_policy_head")
@@ -178,7 +179,17 @@ def main() -> None:
             gae_lambda=args.ppo_gae_lambda,
         )
         from Bobby_Carrot.rl_models.ppo import train_ppo
-        train_ppo(ppo_config, train_config, level_config, icm_config)
+        if args.train_per_level:
+            from Bobby_Carrot.rl_models.expert_data import EXPERT
+            # Train each level individually
+            for level in train_levels:
+                print(f"=== Training Level {level[0]} {level[1]} ===")
+                single_level_config = LevelConfig(train_levels=[level], test_levels=[level])
+                train_config.curriculum = False
+                train_config.checkpoint_dir = Path(args.checkpoint_dir) / f"{level[0]}_{level[1]}"
+                train_ppo(ppo_config, train_config, single_level_config, icm_config, expert_moves=EXPERT)
+        else:
+            train_ppo(ppo_config, train_config, level_config, icm_config)
 
     elif args.algo == "rainbow":
         rainbow_config = RainbowConfig(

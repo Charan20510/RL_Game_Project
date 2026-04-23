@@ -133,6 +133,61 @@ class PPOAgent(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# BC Pre-training
+# ---------------------------------------------------------------------------
+
+def pretrain_bc(
+    agent: PPOAgent,
+    env,
+    expert_moves: List[int],
+    preprocessor: ObservationPreprocessor,
+    device: torch.device,
+    epochs: int = 50,
+    lr: float = 1e-3,
+) -> None:
+    print(f"[BC] Starting Behavioral Cloning pre-training for {epochs} epochs...")
+    agent.train()
+    optimizer = optim.Adam(agent.parameters(), lr=lr)
+    
+    # Collect expert observations
+    obs_list = []
+    actions_list = []
+    
+    obs = env.reset()
+    for action in expert_moves:
+        obs_tensor = preprocessor(obs)
+        obs_list.append(obs_tensor)
+        actions_list.append(action)
+        
+        obs, reward, done, info = env.step(action)
+        if done:
+            break
+            
+    if not obs_list:
+        print("[BC] No expert observations collected.")
+        return
+        
+    obs_batch = torch.stack(obs_list).to(device)
+    action_batch = torch.tensor(actions_list, dtype=torch.long, device=device)
+    
+    for epoch in range(epochs):
+        optimizer.zero_grad()
+        features = agent.encoder(obs_batch)
+        dist = agent.policy(features) # No masking during BC to enforce pure policy
+        
+        log_probs = dist.log_prob(action_batch)
+        loss = -log_probs.mean()
+        
+        loss.backward()
+        optimizer.step()
+        
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"[BC] Epoch {epoch + 1}/{epochs} | Loss: {loss.item():.4f}")
+            
+    print("[BC] Pre-training complete.")
+
+
+# ---------------------------------------------------------------------------
 # PPO Training Loop
 # ---------------------------------------------------------------------------
 
@@ -142,6 +197,7 @@ def train_ppo(
     level_config: LevelConfig,
     icm_config: Optional[ICMConfig] = None,
     resume_path: Optional[str] = None,
+    expert_moves: Optional[List[int]] = None,
 ) -> PPOAgent:
     """Full PPO training with curriculum learning, action masking, and optional ICM.
 
@@ -225,6 +281,12 @@ def train_ppo(
         headless=True,
         max_steps=train_config.max_steps_per_episode,
     )
+
+    # Optional BC Pre-training
+    if expert_moves is not None and len(expert_moves) > 0:
+        pretrain_bc(agent, env, expert_moves, preprocessor, device)
+        # Re-initialize teacher with pretrained weights
+        teacher.load_state_dict(agent.state_dict())
 
     # Determine obs_dim from a reset
     dummy_obs = env.reset()
