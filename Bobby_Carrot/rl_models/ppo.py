@@ -394,8 +394,10 @@ def train_ppo(
                 success = 1.0 if info.get("level_completed", False) else 0.0
                 episode_rewards.append(episode_reward)
                 episode_successes.append(success)
-                total_collected = float(info.get("total_collected", 0.0))
-                total_targets = float(info.get("total_targets", 0.0))
+                tc = info.get("total_collected", 0.0)
+                total_collected = float(tc) if isinstance(tc, (int, float, str)) else 0.0
+                tt = info.get("total_targets", 0.0)
+                total_targets = float(tt) if isinstance(tt, (int, float, str)) else 0.0
                 collected_frac = (total_collected / total_targets) if total_targets > 0 else 0.0
                 episode_collected_fracs.append(collected_frac)
                 curriculum_window.append(success)
